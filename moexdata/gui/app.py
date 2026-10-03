@@ -47,6 +47,9 @@ LEVEL_COLORS = {
     "info": "#000000",
 }
 
+SHIFT_MASK = 0x0001
+CONTROL_MASK = 0x0004
+
 STATUS_LABELS = {"ok": "успешно", "empty": "нет данных", "error": "ошибка"}
 
 
@@ -67,6 +70,7 @@ class MoexDataApp(ttk.Frame):
         self.all_tickers: list[tuple[str, str]] = []
         self.visible_secids: list[str] = []
         self.selected_secids: set[str] = set(self.settings.tickers)
+        self._additive = False
         self.dataset_vars: dict[str, tk.BooleanVar] = {}
         self.stop_flag = False
         self.worker: threading.Thread | None = None
@@ -177,10 +181,11 @@ class MoexDataApp(ttk.Frame):
 
         sel_row = ttk.Frame(left)
         sel_row.grid(row=2, column=0, sticky="ew", pady=(0, 4))
-        ttk.Button(sel_row, text="Выбрать все", command=self._select_all_visible).pack(side="left")
+        ttk.Button(sel_row, text="Добавить все найденные", command=self._select_all_visible).pack(side="left")
         ttk.Button(sel_row, text="Снять выбор", command=self._clear_selection).pack(side="left", padx=6)
-        self.selected_count_var = tk.StringVar(value="Выбрано: 0")
-        ttk.Label(sel_row, textvariable=self.selected_count_var).pack(side="right")
+        ttk.Label(
+            sel_row, text="щелчок - один инструмент, Ctrl/Shift - несколько", foreground="#666"
+        ).pack(side="right")
 
         list_frame = ttk.Frame(left)
         list_frame.grid(row=3, column=0, sticky="nsew")
@@ -191,7 +196,20 @@ class MoexDataApp(ttk.Frame):
         bar = ttk.Scrollbar(list_frame, orient="vertical", command=self.ticker_list.yview)
         bar.grid(row=0, column=1, sticky="ns")
         self.ticker_list.configure(yscrollcommand=bar.set)
+        self.ticker_list.bind("<ButtonPress-1>", self._remember_modifiers)
+        self.ticker_list.bind("<KeyPress>", self._remember_modifiers)
         self.ticker_list.bind("<<ListboxSelect>>", lambda e: self._on_listbox_select())
+
+        chosen_frame = ttk.LabelFrame(left, text="К выгрузке", padding=(6, 4))
+        chosen_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        chosen_frame.columnconfigure(0, weight=1)
+        self.selected_count_var = tk.StringVar(value="Не выбрано ни одного инструмента")
+        ttk.Label(chosen_frame, textvariable=self.selected_count_var).grid(row=0, column=0, sticky="w")
+        ttk.Button(chosen_frame, text="Убрать", command=self._remove_chosen).grid(row=0, column=1, sticky="e")
+        self.chosen_list = tk.Listbox(chosen_frame, height=4, exportselection=False)
+        self.chosen_list.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.chosen_list.bind("<Double-Button-1>", lambda e: self._remove_chosen())
+        self._refresh_chosen()
 
         right = ttk.Frame(tab)
         right.grid(row=0, column=1, sticky="nsew")
@@ -594,7 +612,7 @@ class MoexDataApp(ttk.Frame):
         if market != self._current_market:
             self.selected_secids.clear()
         self._current_market = market
-        self.selected_count_var.set(f"Выбрано: {len(self.selected_secids)}")
+        self._refresh_chosen()
         self._update_plan()
         if load_tickers:
             self._load_tickers_async()
@@ -724,20 +742,57 @@ class MoexDataApp(ttk.Frame):
             if secid in self.selected_secids:
                 self.ticker_list.selection_set(index)
 
-    def _on_listbox_select(self) -> None:
+    def _remember_modifiers(self, event: tk.Event) -> None:
+        self._additive = bool(event.state & (SHIFT_MASK | CONTROL_MASK))
+
+    def _on_listbox_select(self, additive: bool | None = None) -> None:
+        additive = self._additive if additive is None else additive
+        self._additive = False
         chosen = {self.visible_secids[i] for i in self.ticker_list.curselection()}
-        self.selected_secids -= set(self.visible_secids)
-        self.selected_secids |= chosen
-        self.selected_count_var.set(f"Выбрано: {len(self.selected_secids)}")
+        if additive:
+            self.selected_secids -= set(self.visible_secids)
+            self.selected_secids |= chosen
+        else:
+            # Обычный щелчок задаёт выбор заново, включая тикеры, скрытые поиском.
+            self.selected_secids = chosen
+        self._refresh_chosen()
         self._update_plan()
 
     def _select_all_visible(self) -> None:
         self.ticker_list.selection_set(0, "end")
-        self._on_listbox_select()
+        self._on_listbox_select(additive=True)
 
     def _clear_selection(self) -> None:
         self.ticker_list.selection_clear(0, "end")
-        self._on_listbox_select()
+        self.selected_secids.clear()
+        self._refresh_chosen()
+        self._update_plan()
+
+    def _remove_chosen(self) -> None:
+        shown = self._chosen_order
+        for index in self.chosen_list.curselection():
+            self.selected_secids.discard(shown[index])
+        self._apply_filter()
+        self._refresh_chosen()
+        self._update_plan()
+
+    def _refresh_chosen(self) -> None:
+        if not hasattr(self, "chosen_list"):
+            return
+        names = dict(self.all_tickers)
+        self._chosen_order = sorted(self.selected_secids)
+        self.chosen_list.delete(0, "end")
+        for secid in self._chosen_order:
+            label = names.get(secid, secid)
+            self.chosen_list.insert("end", label)
+        count = len(self._chosen_order)
+        if not count:
+            self.selected_count_var.set("Не выбрано ни одного инструмента")
+        elif count == 1:
+            self.selected_count_var.set(f"Выбран: {self._chosen_order[0]}")
+        else:
+            self.selected_count_var.set(f"Выбрано {count}: " + ", ".join(self._chosen_order[:6])
+                                        + (" …" if count > 6 else ""))
 
     def _choose_folder(self) -> None:
         initial = self.out_dir_var.get() or str(DEFAULT_EXPORT_DIR)
@@ -933,7 +988,7 @@ class MoexDataApp(ttk.Frame):
         self.notebook.select(self.tab_log)
         self._log(
             "info",
-            f"Запуск: {len(job.tickers)} тикер(ов) × {len(job.datasets)} набор(ов), "
+            f"Запуск: {', '.join(job.tickers)} × {len(job.datasets)} набор(ов), "
             f"{job.start} — {job.end}, формат {job.file_format} → {job.out_dir}",
         )
 
@@ -993,8 +1048,11 @@ class MoexDataApp(ttk.Frame):
                 kind, payload = self.queue.get_nowait()
                 if kind == "tickers":
                     self.all_tickers = payload
+                    known = {secid for secid, _ in payload}
+                    self.selected_secids &= known
                     self._apply_filter()
-                    self._on_listbox_select()
+                    self._refresh_chosen()
+                    self._update_plan()
                     self.status_var.set(f"Инструментов загружено: {len(payload)}")
                     self._log("info", f"Список инструментов обновлён: {len(payload)}")
                 elif kind == "tickers_error":
