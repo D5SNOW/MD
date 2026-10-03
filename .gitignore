@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Окружения
+venv/
+.venv/
+env/
+
+# Выгрузки, кеш и отчёты
+data/
+.moexdata_cache/
+moexdata_report_*.json
+iss_diag.json
+*.parquet
+*.csv
+*.csv.gz
+*.log
+
+# Настройки с API-ключом
+settings.json
+.env
+
+# IDE и ОС
+.idea/
+.vscode/
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Локальные черновики
+pp.py
+tz.txt
